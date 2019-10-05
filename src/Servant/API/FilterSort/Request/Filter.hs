@@ -14,7 +14,12 @@
 {-# LANGUAGE TypeOperators #-}
 {-# LANGUAGE UndecidableInstances #-}
 
-module Servant.API.FilterSort.Request.Filter where
+module Servant.API.FilterSort.Request.Filter (
+      FilterOperation (..)
+    , FilterOrdering (..)
+    , FilterOperations (..)
+    , FilterBy
+    ) where
 
 import Control.Applicative ((<|>))
 import Control.Monad (join)
@@ -24,9 +29,10 @@ import Data.Maybe (fromMaybe)
 import qualified Data.Text as T
 import Data.Text (Text)
 import Data.Typeable
+import Data.Kind
 import Formatting (Buildable, build, sformat)
 import qualified Formatting.Buildable
-import GHC.TypeLits (KnownSymbol, Symbol, symbolVal)
+import GHC.TypeLits (KnownSymbol, symbolVal)
 import qualified Generics.SOP as SOP
 import Network.HTTP.Types (parseQueryText)
 import Network.Wai (rawQueryString)
@@ -37,9 +43,6 @@ import Servant.Client
 import Servant.Client.Core (appendToQueryString)
 import Servant.Server.Internal
 
---import qualified Cardano.Wallet.API.Request.Parameters as Param
---import           Cardano.Wallet.API.V1.Types
-
 --
 -- Filtering data
 --
@@ -47,11 +50,12 @@ import Servant.Server.Internal
 -- | A list of filter operations
 --
 -- The @ixs@ type parameter is a type-level list of types, indicating which
--- fields we are filtering on; the @a@ type parameter indicates what what we are
--- filtering.
-data FilterOperations ixs a where
+-- fields we are filtering on; the @r@ type parameter indicates what what we are
+-- filtering (i.e. the "resource").
+data FilterOperations (ixs :: [Type]) r where
   -- | Empty list
-  NoFilters :: FilterOperations ixs a
+  NoFilters :: FilterOperations ixs r
+
   -- | Skip a filter
   --
   -- When we are expecting, say
@@ -62,42 +66,43 @@ data FilterOperations ixs a where
   -- constructor can be used to inform the type checker that this filter
   -- is not present. (We can't simply skip the field altogether, because
   -- that would have type @FilterOperations '[Coin]@ instead).
-  FilterNop :: FilterOperations ixs a -> FilterOperations (ix ': ixs) a
-  -- | Insert a filter into the list
+  FilterNop :: FilterOperations ixs r -> FilterOperations (ix ': ixs) r
+
+  -- | Insert a filter into the list, alongside a bunch of constraints we
+  -- can retrieve evidence of when pattern matching on 'FilterOp' later on.
   FilterOp
-    :: ( IsIndexOf ix a,
+    :: ( IsIndexOf ix r,
          Typeable ix,
          FromHttpApiData ix,
          ToHttpApiData ix,
          Eq ix
          )
-    => FilterOperation ix a
-    -> FilterOperations ixs a
-    -> FilterOperations (ix ': ixs) a
+    => FilterOperation ix r
+    -> FilterOperations ixs r
+    -> FilterOperations (ix ': ixs) r
 
 infixr 6 `FilterOp`
 
 instance SOP.All (KnownQueryParam a) ixs => Show (FilterOperations ixs a) where
-
   show _ = "<filter_ops>"
 
 instance Eq (FilterOperations ixs a) where
 
-  NoFilters == NoFilters =
-    True
+  NoFilters == NoFilters = True
+
   FilterOp (f0 :: FilterOperation ix0 a) rest0 == FilterOp (f1 :: FilterOperation ix1 a) rest1 =
     case eqT @ix0 @ix1 of
       Nothing ->
         False
       Just Refl ->
         f0 == f1 && rest0 == rest1
-  FilterNop rest0 == FilterNop rest1 =
-    rest0 == rest1
-  _ == _ =
-    False
 
--- A custom ordering for a 'FilterOperation'. Conceptually theh same as 'Ordering' but with the ">=" and "<="
--- variants.
+  FilterNop rest0 == FilterNop rest1 = rest0 == rest1
+
+  _ == _ = False
+
+-- A custom ordering for a 'FilterOperation'. Conceptually theh same as 
+-- 'Ordering' but with the ">=" and "<=" variants.
 data FilterOrdering
   = Equal
   | GreaterThan
@@ -118,8 +123,8 @@ instance Buildable FilterOrdering where
     LesserThan -> "LT"
     LesserThanEqual -> "LTE"
 
--- A filter operation on the data model
-data FilterOperation ix a
+-- | A filter operation on the data model
+data FilterOperation ix r
   = FilterByIndex ix
     -- ^ Filter by index (e.g. equal to)
   | FilterByPredicate FilterOrdering ix
@@ -129,14 +134,10 @@ data FilterOperation ix a
   | FilterIn [ix]
   deriving (Eq)
 
---instance (BuildableSafe ix, KnownQueryParam a ix) => Show (FilterOperation ix a) where
---    show = formatToString build
 instance ToHttpApiData ix => ToHttpApiData (FilterOperation ix a) where
 
   toQueryParam = renderFilterOperation
 
---instance (BuildableSafeGen (FilterOperation ix a)) => Buildable (FilterOperation ix a) where
---    build = buildSafeGen unsecure
 renderFilterOperation :: ToHttpApiData ix => FilterOperation ix a -> Text
 renderFilterOperation = \case
   FilterByIndex ix ->
@@ -148,8 +149,6 @@ renderFilterOperation = \case
   FilterIn ixs ->
     "IN[" <> T.intercalate "," (map toQueryParam ixs) <> "]"
 
---instance (BuildableSafeGen (FilterOperation ix a)) => Buildable (SecureLog (FilterOperation ix a)) where
---    build = buildSafeGen secure . getSecureLog
 findMatchingFilterOp
   :: forall needle a ixs. Typeable needle
   => FilterOperations ixs a
@@ -201,22 +200,20 @@ mapIx f fop = case fop of
 --     'IndexToQueryParam' 'Wallet' 'WalletId' = "id"
 --     'IndexToQueryParam' 'Wallet' 'Coin'     = "balance"
 -- @
-data FilterBy (params :: [*]) (resource :: *)
+data FilterBy (params :: [Type]) (resource :: Type)
   deriving (Typeable)
 
--- | This is a slighly boilerplat-y type family which maps symbols to
--- indices, so that we can later on reify them into a list of valid indices.
-type family FilterParams (syms :: [Symbol]) (r :: *) :: [*] where
 
+-- | Internal typeclass useful to convert from a incoming list of
+-- query params and value to a structured 'FilterOperations'. Used inside
+-- the 'HasServer' instance.
+class ToFilterOperations (ixs :: [Type]) r where
 
--- FilterParams '[Param.WalletId, Param.Balance] Wallet = IndicesOf Wallet
---  FilterParams '[Param.Id, Param.CreatedAt] Transaction = IndicesOf Transaction
-class ToFilterOperations (ixs :: [*]) a where
+  toFilterOperations :: [(Text, Maybe Text)] 
+                     -> proxy ixs 
+                     -> FilterOperations ixs r
 
-  toFilterOperations :: [(Text, Maybe Text)] -> proxy ixs -> FilterOperations ixs a
-
-instance ToFilterOperations ('[]) a where
-
+instance ToFilterOperations ('[]) r where
   toFilterOperations _ _ = NoFilters
 
 instance

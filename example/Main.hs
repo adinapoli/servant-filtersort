@@ -31,6 +31,8 @@ import qualified Servant.API.FilterSort.Indices.IxSet as IxSet
 import Servant.API.FilterSort.Response.Filter.IxSet
 import Servant.API.FilterSort.Response.Sort.IxSet
 
+-- Let's crate a bunch of newtypes: not only to describe better our API,
+-- but also to disambiguate on what we are filtering and sorting.
 newtype Name = Name { getName :: String }
     deriving (Ord, Eq, ToHttpApiData, FromHttpApiData)
 
@@ -51,12 +53,16 @@ data User = User
 
 deriveToJSON defaultOptions ''User
 
--- library-specific boilerplate
+--
+-- library-specific boilerplate starts here
+--
 
 type instance IndexToQueryParam User Name = "name"
 type instance IndexToQueryParam User Age  = "age"
 
--- The following below are OK as in this example there is no ambiguity.
+-- The following below are OK as in this example there is no ambiguity,
+-- but in a "Real World(TM)" case we would need to wrap 'Day' and 'Int' into
+-- 'newtype's.
 type instance IndexToQueryParam User Day  = "registration_date"
 type instance IndexToQueryParam User Int  = "id"
 
@@ -87,7 +93,7 @@ instance HasPrimKey User where
   primKey = uid
 
 -- | The secondary indices for this resource.
-type SecondaryUserIxs = '[Name, Age, Day]
+type SecondaryUserIxs        = '[Name, Age, Day]
 type instance IndicesOf User = SecondaryUserIxs
 
 instance IxSetTyped.Indexable (Int ': SecondaryUserIxs)
@@ -96,24 +102,27 @@ instance IxSetTyped.Indexable (Int ': SecondaryUserIxs)
                      (ixFun ((:[]) . age))
                      (ixFun ((:[]) . registration_date))
 
-
+-- This is our API.
 type UserAPI
   = "users" :> SortBy '[Day] User
             :> FilterBy '[Int, Name, Age] User
             :> Get '[JSON] [User]
 
-
+-- Let's generate a bunch of users (in the "Real World(TM)" these would
+-- come from elsewhere (i.e. an 'acid-state' DB).
 users :: IxSet User
 users = IxSet.fromList $
-  [ User 1 (Name "Isaac Newton")    (Age 372) "isaac@newton.co.uk" (fromGregorian 1683  3 1)
-  , User 2 (Name "Albert Einstein") (Age 136) "ae@mc2.org"         (fromGregorian 1905 12 1)
-  ]
+    [ User 1 (Name "Isaac Newton")    (Age 372) "isaac@newton.co.uk" (fromGregorian 1683  3 1)
+    , User 2 (Name "Albert Einstein") (Age 136) "ae@mc2.org"         (fromGregorian 1905 12 1)
+    ]
 
+-- This is when it gets nice: we can call 'sortData' and 'applyFilters' to
+-- get a bunch of sorting & filtering combinators for free.
 usersHandler :: SortOperations User 
-             -> FilterOperations '[Int,Name, Age] User 
+             -> FilterOperations '[Int,Name,Age] User 
              -> Handler [User]
-usersHandler sops fops = 
-    return $ sortData sops $ applyFilters fops users
+usersHandler sops = 
+    return . sortData sops . flip applyFilters users
 
 server :: Server UserAPI
 server = usersHandler

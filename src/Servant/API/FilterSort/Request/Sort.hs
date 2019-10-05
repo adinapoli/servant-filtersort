@@ -15,12 +15,18 @@
 {-# LANGUAGE UndecidableInstances #-}
 {-# OPTIONS_GHC -Wno-redundant-constraints #-}
 
-module Servant.API.FilterSort.Request.Sort where
+module Servant.API.FilterSort.Request.Sort (
+      SortOperation (..)
+    , SortOperations (..)
+    , SortBy
+    , SortDirection (..)
+    ) where
 
 import Data.Maybe (mapMaybe)
 import qualified Data.Text as T
 import Data.Text (Text)
 import Data.Typeable
+import Data.Kind
 import Formatting (Buildable, build, formatToString, sformat)
 import qualified Formatting.Buildable
 import GHC.TypeLits (KnownSymbol, symbolVal)
@@ -33,8 +39,6 @@ import Servant.API.FilterSort.Indices.IxSet
 import Servant.Client
 import Servant.Client.Core (appendToQueryString)
 import Servant.Server.Internal
-
--- import           Cardano.Wallet.API.Indices
 
 -- | Represents a sort operation on the data model.
 --
@@ -50,7 +54,7 @@ import Servant.Server.Internal
 -- examples:
 --
 -- * @sort_by=ASC[id]@.
--- * @sort_by=DESC[balance]@
+-- * @sort_by=DES[balance]@
 --
 -- In order for this to work, you need to ensure that the type family
 -- 'IndexToQueryParam' has an entry for each type for the resource.
@@ -61,7 +65,7 @@ import Servant.Server.Internal
 --     'IndexToQueryParam' 'Wallet' 'WalletId' = "id"
 --     'IndexToQueryParam' 'Wallet' 'Coin'     = "balance"
 -- @
-data SortBy (params :: [*]) (resource :: *)
+data SortBy (params :: [Type]) (resource :: Type)
   deriving (Typeable)
 
 -- | The direction for the sort operation.
@@ -71,19 +75,16 @@ data SortDirection
   deriving (Eq, Show)
 
 instance Buildable SortDirection where
-
   build = \case
     SortAscending -> "ASC"
-    SortDescending -> "DESC"
+    SortDescending -> "DES"
 
 -- | A sort operation on an index @ix@ for a resource 'a'.
-data SortOperation ix a
-  = SortByIndex SortDirection (Proxy ix)
+data SortOperation ix a = SortByIndex SortDirection (Proxy ix)
     -- ^ Standard sort by index (e.g. sort_by=balance).
   deriving (Eq)
 
 instance (Buildable (SortOperation ix a)) => Show (SortOperation ix a) where
-
   show = formatToString build
 
 instance
@@ -98,16 +99,16 @@ instance
 
 -- | A "bag" of sort operations, where the index constraint are captured in
 -- the inner closure of 'SortOp'.
-data SortOperations a where
-  NoSorts :: SortOperations a
+data SortOperations r where
+  NoSorts :: SortOperations r
   SortOp
-    :: ( IsIndexOf ix a,
+    :: ( IsIndexOf ix r,
          Typeable ix,
-         KnownSymbol (IndexToQueryParam a ix)
+         KnownSymbol (IndexToQueryParam r ix)
          )
-    => SortOperation ix a
-    -> SortOperations a
-    -> SortOperations a
+    => SortOperation ix r
+    -> SortOperations r
+    -> SortOperations r
 
 instance Eq (SortOperations a) where
 
@@ -119,31 +120,17 @@ instance Eq (SortOperations a) where
         False
       Just Refl ->
         sop0 == sop1 && rest0 == rest1
-  _ == _ =
-    False
+  _ == _ = False
 
 instance Show (SortOperations a) where
-
   show _ = "sort_op"
-
-findMatchingSortOp
-  :: forall (needle :: *) (a :: *). Typeable needle
-  => SortOperations a
-  -> Maybe (SortOperation needle a)
-findMatchingSortOp NoSorts = Nothing
-findMatchingSortOp (SortOp (sop :: SortOperation ix a) rest) =
-  case eqT @needle @ix of
-    Just Refl -> pure sop
-    Nothing -> findMatchingSortOp rest
 
 -- | Handy typeclass to reconcile type and value levels by building a list of 'SortOperation' out of
 -- a type level list.
-class ToSortOperations (ixs :: [*]) a where
-
+class ToSortOperations (ixs :: [Type]) a where
   toSortOperations :: Request -> proxy ixs -> SortOperations a
 
 instance Indexable a => ToSortOperations ('[]) a where
-
   toSortOperations _ _ = NoSorts
 
 instance
